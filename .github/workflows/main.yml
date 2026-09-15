@@ -12,11 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-
-jobs:
   windows-full-build:
     name: Build Ardour on Windows x64 via MSYS2
     runs-on: windows-2022
