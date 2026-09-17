@@ -243,13 +243,27 @@ jobs:
           export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
           python3 ./waf install 2>&1 | tee _ci_logs/install.log
 
-      - name: Package Ardour (DLLs + NSIS installer)
+      - name: Package Ardour (zip binaries + DLLs)
         run: |
           set -euxo pipefail
           export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
-          export WAFINSTALL_PREFIX="$PWD/_ci_install"
-          export OUTDIR="$PWD/_ci_artifacts"
-          bash tools/x-win/package-msys2.sh 2>&1 | tee _ci_logs/package.log
+          INSTALL_DIR="$PWD/_ci_install"
+          OUTDIR="$PWD/_ci_artifacts"
+          VERSION=$(git describe --tags --always | sed 's/^v//')
+          ZIP_NAME="Ardour-${VERSION}-windows-x64.zip"
+
+          EXE=$(find "$INSTALL_DIR" -iname "ardour*.exe" | head -n1)
+          if [ -n "$EXE" ]; then
+            ntldd -R "$EXE" 2>/dev/null | awk '{print $3}' | grep -i "$MINGW_PREFIX" | while read -r dll; do
+              [ -f "$dll" ] && cp -u "$dll" "$INSTALL_DIR/bin/" || true
+            done
+          fi
+
+          cd "$INSTALL_DIR"
+          zip -r -q "$OUTDIR/$ZIP_NAME" . 2>&1 | tee "$OLDPWD/_ci_logs/package.log"
+          cd "$OLDPWD"
+          echo "=== Zip created ==="
+          ls -la "$OUTDIR"
 
       - name: Upload build logs
         if: always()
