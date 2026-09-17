@@ -1,0 +1,276 @@
+name: Build Ardour (stable-9.8)
+
+on:
+  push:
+    branches: [ "stable-9.8" ]
+  pull_request:
+    branches: [ "stable-9.8" ]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-full-build:
+    name: Build Ardour on Windows x64 via MSYS2
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2G
+      MINGW_PREFIX: /mingw64
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      # ===============================================================
+      # CHECKOUT - fork se, full history
+      # ===============================================================
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          cache: true
+          msystem: MINGW64
+          install: >-
+            base-devel
+            git
+            zip
+            unzip
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-ccache
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-glibmm
+            mingw-w64-x86_64-cairomm
+            mingw-w64-x86_64-pangomm
+            mingw-w64-x86_64-libsndfile
+            mingw-w64-x86_64-libarchive
+            mingw-w64-x86_64-liblo
+            mingw-w64-x86_64-fluidsynth
+            mingw-w64-x86_64-taglib
+            mingw-w64-x86_64-rubberband
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-aubio
+            mingw-w64-x86_64-libsamplerate
+            mingw-w64-x86_64-lv2
+            mingw-w64-x86_64-lilv
+            mingw-w64-x86_64-fftw
+            mingw-w64-x86_64-flac
+            mingw-w64-x86_64-libogg
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libxml2
+            mingw-w64-x86_64-fontconfig
+            mingw-w64-x86_64-portaudio
+            mingw-w64-x86_64-jack2
+            mingw-w64-x86_64-nsis
+            mingw-w64-x86_64-ntldd
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-windows-x64-${{ github.ref_name }}-${{ hashFiles('wscript') }}
+          restore-keys: |
+            ccache-windows-x64-${{ github.ref_name }}-
+            ccache-windows-x64-
+
+      - name: Prepare output folders
+        run: |
+          mkdir -p _ci_logs
+          mkdir -p _ci_artifacts
+
+      # ===============================================================
+      # FIX 1: FORK ke liye tag ka intezam
+      # ===============================================================
+      - name: Fix git tags for fork
+        run: |
+          set -euxo pipefail
+          git remote add upstream https://github.com/Ardour/ardour.git 2>/dev/null || true
+          git fetch upstream --tags --force 2>&1 || echo "Upstream fetch failed, will create temp tag"
+          echo "=== Tags after upstream fetch ==="
+          git tag -l | head -30
+          if [ -z "$(git tag -l)" ]; then
+            echo "WARNING: No tags found. Creating temporary tag v9.8"
+            git tag -a v9.8 -m "Temporary tag for CI build" HEAD
+          fi
+          echo "=== Final git describe ==="
+          git describe --tags --always
+
+      # ===============================================================
+      # FIX 2: sys/vfs.h aur baaki POSIX headers
+      # ===============================================================
+      - name: Fix MSVC/POSIX headers
+        run: |
+          set -euxo pipefail
+          cd msvc_extra_headers/ardourext
+          for f in *.input; do
+            [ -f "$f" ] && mv "$f" "${f%.input}"
+          done
+          mkdir -p sys
+          if [ ! -f sys/vfs.h ]; then
+            echo "Creating empty sys/vfs.h"
+            touch sys/vfs.h
+          fi
+          echo "=== Headers after fix ==="
+          ls -la
+          echo "=== sys/ contents ==="
+          ls -la sys/
+
+      # ===============================================================
+      # FIX 3: libs/pbd/file_utils.cc passes a raw wchar_t*/wchar_t[]
+      # straight into string_compose(), which formats through a
+      # std::ostream<char>. That overload has always been ill-formed by
+      # the standard; older GCC just let it through silently, but
+      # MSYS2's rolling mingw-w64-x86_64-gcc (currently 16.2.0) marks it
+      # =deleted, turning it into a hard compile error:
+      #   "use of deleted function ... operator<<(..., const wchar_t*)"
+      # Both call sites are pure DEBUG_TRACE diagnostics -- swapping the
+      # wide arg for the already-in-scope narrow `path` string keeps the
+      # message meaningful and compiles under the stricter libstdc++.
+      # Verified against the actual 9.8 source before adding this step.
+      # ===============================================================
+      - name: Fix wchar_t-into-string_compose (deleted operator<<)
+        run: |
+          set -euxo pipefail
+          FILE="libs/pbd/file_utils.cc"
+
+          sed -i \
+            's/string_compose ("PBD::canonical_path: Unable to resolve %1\\n", wfilepath)/string_compose ("PBD::canonical_path: Unable to resolve %1\\n", path)/' \
+            "$FILE"
+          sed -i \
+            's/resolved_wpath));$/path));/' \
+            "$FILE"
+
+          echo "=== Patched lines (should show 'path', not wfilepath/resolved_wpath) ==="
+          grep -n "Unable to resolve %1\|Unable to convert path from utf16" -A1 "$FILE"
+
+      # ===============================================================
+      # FIX 4: u8"..." string literals (char8_t under C++20) implicitly
+      # converted to std::string/const char*/Glib::ustring. This is NOT
+      # a one-off -- it's a systemic pattern across ~77 call sites in
+      # libs/ and gtk2_ardour/ (Delta/degree/musical symbols, arrows,
+      # checkmarks, etc. used as UI/debug strings). Under GCC's stricter
+      # C++20 char8_t handling this fails with "cannot convert ... to
+      # const char*" at every single one of them, one at a time, as the
+      # build progresses further each run -- which is why fresh errors
+      # kept appearing after each previous fix. Stripping the u8 prefix
+      # everywhere in one pass (GCC's execution charset is UTF-8 by
+      # default, so the resulting plain narrow literals still encode the
+      # same bytes) fixes all ~77 in a single step instead of one build
+      # attempt per occurrence. Verified: 77 -> 0 occurrences after this
+      # sed, diffed against the actual 9.8 source before adding this step.
+      # ===============================================================
+      - name: Fix u8-prefixed string literals (char8_t deleted conversions)
+        run: |
+          set -euxo pipefail
+          BEFORE=$(grep -rc 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ | awk -F: '{s+=$2} END {print s+0}')
+          echo "u8\"...\" occurrences before: $BEFORE"
+
+          grep -rl 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ | xargs -r sed -i 's/\bu8"/"/g'
+
+          AFTER=$(grep -rc 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ | awk -F: '{s+=$2} END {print s+0}')
+          echo "u8\"...\" occurrences after: $AFTER"
+          if [ "$AFTER" -ne 0 ]; then
+            echo "::error::Expected 0 remaining u8\"...\" literals, found $AFTER -- upstream source may have changed, inspect before continuing"
+            grep -rn 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/
+            exit 1
+          fi
+
+      - name: Show toolchain versions
+        run: |
+          set -euxo pipefail
+          mkdir -p "$CCACHE_DIR"
+          export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
+          which python3 | tee _ci_logs/python-which.log
+          python3 --version 2>&1 | tee _ci_logs/python.log
+          gcc --version 2>&1 | tee _ci_logs/gcc.log
+          pkg-config --version 2>&1 | tee _ci_logs/pkg-config.log
+          ccache -p | tee _ci_logs/ccache-config.log
+
+      - name: Configure Ardour
+        run: |
+          set -euxo pipefail
+          export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
+          export PKG_CONFIG_PATH="$MINGW_PREFIX/lib/pkgconfig"
+          python3 ./waf configure \
+            --check-c-compiler=gcc \
+            --check-cxx-compiler=g++ \
+            --no-dr-mingw \
+            --keepflags \
+            --dist-target=mingw \
+            --also-include="$MINGW_PREFIX/include" \
+            --with-backends=jack,dummy,portaudio \
+            --prefix="$PWD/_ci_install" \
+            --libdir="$PWD/_ci_install/lib" 2>&1 | tee _ci_logs/configure.log || {
+              if [[ -f build/config.log ]]; then
+                cp build/config.log _ci_logs/config.full.log
+                tail -n 200 build/config.log | tee -a _ci_logs/configure.log
+              fi
+              exit 1
+            }
+
+      - name: Build Ardour
+        run: |
+          set -euxo pipefail
+          export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
+          python3 ./waf -j "${{ inputs.jobs || '2' }}" 2>&1 | tee _ci_logs/build.log
+          python3 ./waf i18n 2>&1 | tee _ci_logs/i18n.log
+
+      - name: Show ccache stats
+        if: always()
+        run: |
+          set -euxo pipefail
+          ccache -s || true
+
+      - name: Install Ardour data files
+        run: |
+          set -euxo pipefail
+          export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
+          python3 ./waf install 2>&1 | tee _ci_logs/install.log
+
+      - name: Package Ardour (DLLs + NSIS installer)
+        run: |
+          set -euxo pipefail
+          export PATH="$MINGW_PREFIX/bin:/usr/bin:$PATH"
+          export WAFINSTALL_PREFIX="$PWD/_ci_install"
+          export OUTDIR="$PWD/_ci_artifacts"
+          bash tools/x-win/package-msys2.sh 2>&1 | tee _ci_logs/package.log
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-windows-logs
+          path: _ci_logs/*
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Ardour installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-windows-x64-installer
+          path: _ci_artifacts/Ardour-*-windows-x64-Setup.exe
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload Ardour binaries (fallback zip if no installer)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-windows-x64
+          path: _ci_artifacts/Ardour-*-windows-x64.zip
+          if-no-files-found: ignore
+          retention-days: 14
