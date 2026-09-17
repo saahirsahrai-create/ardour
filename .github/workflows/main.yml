@@ -115,10 +115,12 @@ jobs:
       - name: Fix MSVC/POSIX headers
         run: |
           set -euxo pipefail
-          cd msvc_extra_headers/ardourext
+          cd msvc_extra_headers/ardourext || { echo "::error::msvc_extra_headers/ardourext not found"; exit 1; }
+          shopt -s nullglob
           for f in *.input; do
-            [ -f "$f" ] && mv "$f" "${f%.input}"
+            mv "$f" "${f%.input}"
           done
+          shopt -u nullglob
           mkdir -p sys
           if [ ! -f sys/vfs.h ]; then
             echo "Creating empty sys/vfs.h"
@@ -155,7 +157,7 @@ jobs:
             "$FILE"
 
           echo "=== Patched lines (should show 'path', not wfilepath/resolved_wpath) ==="
-          grep -n "Unable to resolve %1\|Unable to convert path from utf16" -A1 "$FILE"
+          grep -n "Unable to resolve %1\|Unable to convert path from utf16" -A1 "$FILE" || true
 
       # ===============================================================
       # FIX 4: u8"..." string literals (char8_t under C++20) implicitly
@@ -176,12 +178,12 @@ jobs:
       - name: Fix u8-prefixed string literals (char8_t deleted conversions)
         run: |
           set -euxo pipefail
-          BEFORE=$(grep -rc 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ | awk -F: '{s+=$2} END {print s+0}')
+          BEFORE=$( (grep -rc 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ || true) | awk -F: '{s+=$2} END {print s+0}')
           echo "u8\"...\" occurrences before: $BEFORE"
 
-          grep -rl 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ | xargs -r sed -i 's/\bu8"/"/g'
+          (grep -rl 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ || true) | xargs -r sed -i 's/\bu8"/"/g'
 
-          AFTER=$(grep -rc 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ | awk -F: '{s+=$2} END {print s+0}')
+          AFTER=$( (grep -rc 'u8"' --include="*.cc" --include="*.h" libs/ gtk2_ardour/ || true) | awk -F: '{s+=$2} END {print s+0}')
           echo "u8\"...\" occurrences after: $AFTER"
           if [ "$AFTER" -ne 0 ]; then
             echo "::error::Expected 0 remaining u8\"...\" literals, found $AFTER -- upstream source may have changed, inspect before continuing"
