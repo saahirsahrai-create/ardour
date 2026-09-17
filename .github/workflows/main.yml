@@ -252,9 +252,12 @@ jobs:
           VERSION=$(git describe --tags --always | sed 's/^v//')
           ZIP_NAME="Ardour-${VERSION}-windows-x64.zip"
 
-          EXE=$(find "$INSTALL_DIR" -iname "ardour*.exe" | head -n1)
+          EXE=$(find "$INSTALL_DIR/bin" -maxdepth 1 -iname "ardour[0-9]*.exe" | grep -v -- '-' | head -n1)
+          if [ -z "$EXE" ]; then
+            EXE=$(find "$INSTALL_DIR" -iname "ardour*.exe" | head -n1)
+          fi
           if [ -n "$EXE" ]; then
-            ntldd -R "$EXE" 2>/dev/null | awk '{print $3}' | grep -i "$MINGW_PREFIX" | while read -r dll; do
+            ntldd -R "$EXE" 2>/dev/null | awk '{print $3}' | { grep -i "$MINGW_PREFIX" || true; } | while read -r dll; do
               [ -f "$dll" ] && cp -u "$dll" "$INSTALL_DIR/bin/" || true
             done
           fi
