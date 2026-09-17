@@ -252,7 +252,10 @@ jobs:
           VERSION=$(git describe --tags --always | sed 's/^v//')
           ZIP_NAME="Ardour-${VERSION}-windows-x64.zip"
 
-          EXE=$(find "$INSTALL_DIR/bin" -maxdepth 1 -iname "ardour[0-9]*.exe" | grep -v -- '-' | head -n1)
+          echo "=== _ci_install/bin contents ==="
+          ls -la "$INSTALL_DIR/bin" || true
+
+          EXE=$(find "$INSTALL_DIR/bin" -maxdepth 1 -iname "ardour[0-9]*.exe" | { grep -v -- '-' || true; } | head -n1)
           if [ -z "$EXE" ]; then
             EXE=$(find "$INSTALL_DIR" -iname "ardour*.exe" | head -n1)
           fi
