@@ -319,15 +319,15 @@ jobs:
           for pass in 1 2 3 4 5; do
             echo 0 > "$COUNTER_FILE"
             while IFS= read -r -d '' modfile; do
-              ntldd -R "$modfile" 2>/dev/null | awk '{print $3}' \
-                | grep -i "$MINGW_PREFIX" 2>/dev/null | while read -r dll; do
+              { ntldd -R "$modfile" 2>/dev/null || true; } | awk '{print $3}' \
+                | { grep -i "$MINGW_PREFIX" || true; } | while read -r dll; do
                   [ -f "$dll" ] || continue
                   base=$(basename "$dll")
                   if [ ! -f "$BINDIR/$base" ]; then
                     cp -u "$dll" "$BINDIR/"
                     echo 1 > "$COUNTER_FILE"
                   fi
-              done
+              done || true
             done < <(find "$INSTALL_DIR" -type f \( -iname "*.exe" -o -iname "*.dll" \) -print0)
             NEW=$(cat "$COUNTER_FILE")
             echo "=== dependency pass $pass done (new dlls copied: $NEW) ==="
